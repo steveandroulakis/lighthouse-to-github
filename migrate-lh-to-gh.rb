@@ -1,4 +1,5 @@
 # Created by Thomas Balthazar, Copyright 2009
+# Edited by Steve Androulakis github.com/steveandroulakis
 # This script is provided as is, and is released under the MIT license : http://www.opensource.org/licenses/mit-license.php
 # more information here : http://suitmymind.com/2009/04/18/move-your-tickets-from-lighthouse-to-github/
 
@@ -6,12 +7,13 @@ require 'rubygems'
 require 'lighthouse-api'
 require 'yaml'
 require 'uri'
+require 'github_api'
 
 # -----------------------------------------------------------------------------------------------
 # --- Lighthouse configuration
-LIGHTHOUSE_ACCOUNT      = 'YOUR_ACCOUNT_NAME'
-LIGHTHOUSE_API_TOKEN    = 'YOUR_API_TOKEN'
-LIGHTHOUSE_PROJECT_ID   = YOUR_PROJECT_ID
+LIGHTHOUSE_ACCOUNT      = 'user@email.com'
+LIGHTHOUSE_API_TOKEN    = '1234abcd33333cacb70758d916bbda0f0d7fb3754'
+LIGHTHOUSE_PROJECT_ID   = 90210
 LIGHTHOUSE_TICKET_QUERY = "state:open"
 # Specify an array of tags here, and only those tags will be migrated. If nil is specified, all the tags will be migrated
 LIGHTHOUSE_TAGS_TO_KEEP = nil
@@ -19,21 +21,16 @@ LIGHTHOUSE_TAGS_TO_KEEP = nil
 
 # -----------------------------------------------------------------------------------------------
 # --- Github configuration
-GITHUB_LOGIN      = "YOUR_ACCOUNT_NAME"
-GITHUB_API_TOKEN  = "YOUR_API_TOKEN"
-GITHUB_PROJECT    = "YOUR_GITHUB_PROJECT_NAME"
-
-
-# do not modify
-GITHUB_NEW_ISSUE_API_URL    = "https://github.com/api/v2/yaml/issues/open/#{GITHUB_LOGIN}/#{GITHUB_PROJECT}"
-GITHUB_ADD_LABEL_API_URL    = "https://github.com/api/v2/yaml/issues/label/add/#{GITHUB_LOGIN}/#{GITHUB_PROJECT}"
-GITHUB_ADD_COMMENT_API_URL  = "https://github.com/api/v2/yaml/issues/comment/#{GITHUB_LOGIN}/#{GITHUB_PROJECT}"
-
+GITHUB_LOGIN      = "steveandroulakis"
+GITHUB_PASSWORD   = "xxxx"
+GITHUB_PROJECT    = "x"
 
 # -----------------------------------------------------------------------------------------------
 # --- setup LH
-Lighthouse.account  = LIGHTHOUSE_ACCOUNT
-Lighthouse.token    = LIGHTHOUSE_API_TOKEN
+Lighthouse.account  = 'accountname'
+# Lighthouse.token    = LIGHTHOUSE_API_TOKEN
+Lighthouse.email = "user@email.com"
+Lighthouse.password = "yyyy"
 project             = Lighthouse::Project.find(LIGHTHOUSE_PROJECT_ID)
 
 
@@ -49,10 +46,14 @@ while tmp_tickets.length > 0
 end
 puts "#{tickets.length} will be migrated from Lighthouse to Github.\n\n"
 
-
 # -----------------------------------------------------------------------------------------------
 # --- for each LH ticket, create a GH issue, and tag it
 tickets.each { |ticket|
+
+  github = Github.new :login=>GITHUB_LOGIN, :password=>GITHUB_PASSWORD
+  token_res = github.oauth.create 'scopes' => ['repo']
+  token_res['token']
+
   # fetch the ticket individually to have the different 'versions'
   ticket = Lighthouse::Ticket.find(ticket.id, :params => { :project_id => LIGHTHOUSE_PROJECT_ID})
   
@@ -62,7 +63,6 @@ tickets.each { |ticket|
   # this is the assigned user name of the corresponding LH ticket  
   assignee = versions.last.assigned_user_name unless versions.last.attributes["assigned_user_name"].nil?  
 
-  # why gsub? -> curl -F 'title=@xxx' -> 'title= @xxx' cause =@xxx means xxx is a file to upload http://curl.haxx.se/docs/manpage.html#-F--form
   title = ticket.title.gsub(/^@/," @")
   body  = versions.first.body.gsub(/^@/," @") unless versions.first.body.nil? 
   body||=""
@@ -73,16 +73,17 @@ tickets.each { |ticket|
   # add the number of attachments
   body+="\n\n This ticket has #{ticket.attachments_count} attachment(s)." unless ticket.attributes["attachments_count"].nil?
 
-  # escape single quote
-  title.gsub!(/'/,"&rsquo;")
-  body.gsub!(/'/,"&rsquo;")
-
   # the first version contains the initial ticket body
   versions.delete_at(0) 
-    
-  # create the GH issue and get its newly created id
-  gh_return_value = `curl -F 'login=#{GITHUB_LOGIN}' -F 'token=#{GITHUB_API_TOKEN}' -F 'title=#{title}' -F 'body=#{body}' #{GITHUB_NEW_ISSUE_API_URL}`
-  gh_issue_id = YAML::load(gh_return_value)["issue"]["number"]
+
+  issues = Github::Issues.new :oauth_token=>token_res['token']
+
+  
+  issue = issues.create('mytardis','mytardis', :title=>title, :body=>body)
+
+  labels = Github::Issues::Labels.new :oauth_token=>token_res['token']
+  comments = Github::Issues::Comments.new :oauth_token=>token_res['token']
+
   
   # add comments to the newly created GH issue
   versions.each { |version|
@@ -90,26 +91,41 @@ tickets.each { |ticket|
     comment = "**#{version.title.gsub(/^@/," @").gsub(/'/,"&rsquo;")}**\n\n"
     comment+=version.body.gsub(/^@/," @").gsub(/'/,"&rsquo;") unless version.body.nil?
     comment+="\n\n by " + version.user_name.gsub(/^@/," @").gsub(/'/,"&rsquo;") unless version.user_name.nil?
-    `curl -F 'login=#{GITHUB_LOGIN}' -F 'token=#{GITHUB_API_TOKEN}' -F 'comment=#{comment}' #{GITHUB_ADD_COMMENT_API_URL}/#{gh_issue_id}`
+    
+    comments.create('mytardis','mytardis', issue['number'], :body=>comment)
   }  
   
   # here you can specify the labels you want to be applied to your newly created GH issue
   # preapare the labels for the GH issue
   gh_labels = []
-  lh_tags = ticket.tags
-  # only migrate LIGHTHOUSE_TAGS_TO_KEEP tags if specified
-  lh_tags.delete_if { |tag| !LIGHTHOUSE_TAGS_TO_KEEP.include?(tag) } unless LIGHTHOUSE_TAGS_TO_KEEP.nil?
-  # these are the tags of the corresponding LH ticket, replace @ by # because @ will be used to tag assignees in GH
-  gh_labels += lh_tags.map { |tag| tag.gsub(/^@/,"#") }  
-  gh_labels << "|M| " + ticket.milestone_title unless ticket.attributes["milestone_title"].nil? # this is the milestone title of the corresponding LH ticket
-  gh_labels << "@" + assignee unless assignee.nil?
-  gh_labels << "|S| " + ticket.state # this is the state of the corresponding LH ticket
-  gh_labels << "from-lighthouse" # this is a label that specify that this GH issue has been created from a LH ticket
+  begin
+    lh_tags = ticket.tags
+    # only migrate LIGHTHOUSE_TAGS_TO_KEEP tags if specified
+    lh_tags.delete_if { |tag| !LIGHTHOUSE_TAGS_TO_KEEP.include?(tag) } unless LIGHTHOUSE_TAGS_TO_KEEP.nil?
+    # these are the tags of the corresponding LH ticket, replace @ by # because @ will be used to tag assignees in GH
+    gh_labels += lh_tags.map { |tag| tag.gsub(/^@/,"#") }  
+    gh_labels << "milestone-" + ticket.milestone_title unless ticket.attributes["milestone_title"].nil? # this is the milestone title of the corresponding LH ticket
+    gh_labels << "assignee-" + assignee unless assignee.nil?
+    gh_labels << "state- " + ticket.state # this is the state of the corresponding LH ticket
+    gh_labels << "from-lighthouse" # this is a label that specify that this GH issue has been created from a LH ticket    
+  rescue NoMethodError
+
+  end
   
   # tag the issue
   gh_labels.each { |label|
     # labels containing . do not work ... -> replace . by •
-    label.gsub!(/\./,"•")
-    `curl -F 'login=#{GITHUB_LOGIN}' -F 'token=#{GITHUB_API_TOKEN}' #{GITHUB_ADD_LABEL_API_URL}/#{URI.escape(label)}/#{gh_issue_id}`
+    label.gsub!(/\./,".")
+    puts label
+    begin
+      
+      labels.create('mytardis','mytardis', :name=>label, :color=>"FFFFFF")
+    rescue Github::Error::UnprocessableEntity
+      puts label + " exists, skipping creation"
+    end
+    
+    labels.add('mytardis','mytardis', issue['number'], label)
+
   }
+
 }
